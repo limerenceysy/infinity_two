@@ -741,6 +741,30 @@ class Infinity(nn.Module):
     def get_layer_id_and_scale_exp(self, para_name: str):
         raise NotImplementedError
 
+#amend1: print and set all crossattention mat_q
+def print_all_crossattention_mat_q(model):
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == "CrossAttention":
+            print(f'CrossAttention: {name} | shape: {module.mat_q.weight.shape}')
+            print(module.mat_q.weight)
+            print('-'*60)
+
+def set_all_crossattention_mat_q(model, val=0.):
+    import torch
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == "CrossAttention":
+            with torch.no_grad():
+                module.mat_q.weight.fill_(val)
+            print(f"{name}.mat_q.weight 已赋为 {val}")
+
+def set_crossattention_mat_q_with_tensor(model, layer_index, new_weight_tensor):
+    crossattns = [m for m in model.modules() if m.__class__.__name__ == "CrossAttention"]
+    m = crossattns[layer_index]
+    assert m.mat_q.weight.shape == new_weight_tensor.shape
+    with torch.no_grad():
+        m.mat_q.weight.copy_(new_weight_tensor)
+    print(f'layer {layer_index} mat_q 权重已替换')
+#amend1: end
 
 def sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV: torch.Tensor, top_k: int = 0, top_p: float = 0.0, rng=None, num_samples=1) -> torch.Tensor:  # return idx, shaped (B, l)
     B, l, V = logits_BlV.shape

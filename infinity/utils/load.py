@@ -73,6 +73,16 @@ def build_vae_gpt(args: arg_util.Args, vae_st: dict, skip_gpt: bool, force_flash
     gpt_kw['vae_local'] = vae_local
     
     model_str = args.model.replace('vgpt', 'infinity')   # legacy
+    # Strip common checkpoint filename suffixes (e.g., _reg, _reg.pth) to get the base model name
+    # These suffixes are part of checkpoint filenames but not model architecture names
+    if model_str.endswith('.pth'):
+        model_str = model_str[:-4]  # Remove .pth extension
+    # Remove common suffixes like _reg, _d32reg, etc.
+    common_suffixes = ['_reg', '_d32reg', '_d16reg', '_d24reg', '_d64reg']
+    for suffix in common_suffixes:
+        if model_str.endswith(suffix):
+            model_str = model_str[:-len(suffix)]
+            break
     print(f"{model_str=}")
     if model_str.rsplit('c', maxsplit=1)[-1].isdecimal():
         model_str, block_chunks = model_str.rsplit('c', maxsplit=1)

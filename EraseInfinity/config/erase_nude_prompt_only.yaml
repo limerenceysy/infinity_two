@@ -1,0 +1,116 @@
+# EraseInfinity Configuration for Nude Concept Erasing (Prompt-Only)
+# 只使用 prompt 的nude概念擦除配置 - 不需要真实nude图像！
+#
+# 核心原理：
+# - ESD loss只需要text prompt来生成中间状态z
+# - pixel_values只用来提供batch size和shape信息
+# - 因此可以使用随机噪声或固定图像作为pixel_values
+
+# ==================== 模型配置 ====================
+model_name: "infinity_2b_reg"
+# ⚠️ 请修改为实际路径（相对于项目根目录或绝对路径）
+vae_ckpt: "weights/infinity_vae_d32reg.pth"  # VAE checkpoint 路径
+gpt_ckpt: "weights/infinity_2b_reg.pth"      # Infinity GPT checkpoint 路径
+t5_path: "google/flan-t5-xl"                  # T5 text encoder 路径（或 "weights/flan-t5-xl"）
+
+# ==================== LoRA 配置 ====================
+# Infinity 模型需要添加 LoRA 适配器进行微调
+use_lora: true
+lora_rank: 8
+lora_alpha: 8
+lora_dropout: 0.0
+# 目标模块：只针对 CrossAttention.proj 层（推荐）
+lora_target_modules:
+  - "ca.proj"  # 只匹配 Cross-Attention 的投影层（推荐用于概念擦除）
+  # 如果想微调其他模块，可以取消注释：
+  # - "ca.mat_qkv"      # Cross-Attention 的 QKV 矩阵
+  # - "sa.proj"         # Self-Attention 的投影层（通常不需要）
+
+# ==================== Prompt-Only 数据配置 ====================
+# ✓ 不需要真实nude图像！
+use_prompt_only: true  # 使用prompt-only dataset
+instance_data_dir: null  # 不需要图像目录
+instance_prompt: "nude person, naked body, explicit content, nudity"  # 要擦除的概念描述
+key_word: "nude"  # 要擦除的核心关键词
+num_samples: 200  # 虚拟样本数量（每个epoch的步数）
+use_random_noise: true  # true=随机噪声，false=固定灰色图像
+
+# ==================== 训练配置 ====================
+resolution: 256  # Infinity 训练分辨率 (pn=0.06M)
+pn: "0.06M"      # Infinity pixel number 配置
+train_batch_size: 4
+gradient_accumulation_steps: 1
+num_train_epochs: 9  # 训练10轮（如果设置了max_train_steps，会基于它计算实际epoch数）
+max_train_steps: 0  # 0表示使用num_train_epochs，否则优先使用max_train_steps
+learning_rate: 1e-3
+lr_scheduler: "constant"
+lr_warmup_steps: 0
+
+# ==================== 优化器配置 ====================
+optimizer: "adamw"
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 1e-5
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# ==================== ESD Loss 配置 ====================
+# ESD (Erased Stable Diffusion) loss 配置
+lamb1: 1.0                # ESD loss 权重
+negative_guidance: 1.0    # ESD negative guidance 强度（推荐1.0-1.5）
+start_guidance: 3.0       # 采样时的 guidance scale
+ddim_steps: 28            # DDIM 采样步数（不使用，仅保留用于兼容）
+
+# ==================== 其他配置 ====================
+mixed_precision: "bf16"
+dataloader_num_workers: 0
+seed: 42
+# Infinity 模型架构参数（必须与预训练权重匹配）
+rope2d_each_sa_layer: 1  # 必须为1，否则会报错
+rope2d_normalized_by_hw: 2  # 推荐值为2
+# ⚠️ 请修改为实际路径（相对于项目根目录或绝对路径）
+output_dir: "EraseInfinity/outputs/erase_nude_prompt_only"  # LoRA 权重输出目录
+logging_dir: "logs"
+checkpointing_steps: 2000
+save_steps: 200
+log_freq: 10
+cache_latents: false
+with_prior_preservation: false
+gradient_checkpointing: false
+train_text_encoder: false
+
+# ==================== 分布式训练配置 ====================
+devices: "0"              # 使用的 GPU 设备
+world_size: 1
+
+# ==================== Wandb 配置 ====================
+report_to: "none"  # 禁用 wandb，避免 API key 错误
+project_name: "EraseInfinity"
+exp_name: "erase_nude_prompt_only_infinity_2b"
+
+# ==================== 数据增强配置 ====================
+center_crop: false
+random_flip: false
+repeats: 1
+
+# ==================== 推理配置 ====================
+cfg_scale: 7.5            # classifier-free guidance scale
+sampling_steps: 250       # Infinity 采样步数
+top_p: 0.9
+top_k: 900
+
+# ==================== 兼容性配置 ====================
+guidance_scale: 3.5
+logit_mean: 0.0
+logit_std: 1.0
+mode_scale: 1.29
+weighting_scheme: "none"
+max_sequence_length: 256
+use_8bit_adam: false
+lr_num_cycles: 1
+lr_power: 1.0
+revision: null
+variant: null
+lora_layers: null
+rank: 8
+

@@ -20,7 +20,7 @@ from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_te
 MODEL_CACHE = "model_cache"
 MODEL_URL = f"https://weights.replicate.delivery/default/FoundationVision/Infinity/model_cache.tar"
 
-
+#使用 pget 工具从远程地址下载并解压模型权重到本地目录
 def download_weights(url, dest):
     start = time.time()
     print("downloading url: ", url)
@@ -118,13 +118,16 @@ def load_transformer(vae, args):
 
 
 class Predictor(BasePredictor):
+    #setup() 方法在容器启动时运行一次，用于加载模型到内存
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
 
+        #如果本地没有缓存，就下载
         if not os.path.exists(MODEL_CACHE):
             print("downloading")
             download_weights(MODEL_URL, MODEL_CACHE)
 
+        #拼接模型、VAE、文本编码器的路径
         model_path = f"{MODEL_CACHE}/FoundationVision/Infinity/infinity_2b_reg.pth"
         vae_path = f"{MODEL_CACHE}/FoundationVision/Infinity/infinity_vae_d32reg.pth"
         text_encoder_ckpt = f"{MODEL_CACHE}/google/flan-t5-xl"

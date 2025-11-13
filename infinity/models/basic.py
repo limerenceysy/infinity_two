@@ -35,7 +35,7 @@ except ImportError:
     def rms_norm_impl(x, weight, epsilon):
         return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True).add_(epsilon))) * weight
 
-
+# 2D RoPE（Rotary Position Embedding，旋转位置编码）频率网格的预计算逻辑，用于为二维结构（如图像的高 / 宽维度）生成位置编码的频率信息
 def precompute_rope2d_freqs_grid(dim, dynamic_resolution_h_w, rope2d_normalized_by_hw, pad_to_multiplier=1, max_height=2048 // 16, max_width=2048 // 16, base=10000.0, device=None, scaling_factor=1.0):
     # split the dimension into half, one for x and one for y
     half_dim = dim // 2
@@ -93,7 +93,8 @@ def precompute_rope2d_freqs_grid(dim, dynamic_resolution_h_w, rope2d_normalized_
             rope2d_freqs_grid[str(tuple(tmp_scale_schedule))] = cat_rope_cache
     return rope2d_freqs_grid
 
-
+#实现了2D RoPE（旋转位置编码）在查询（Query, q）和键（Key, k）上的应用逻辑
+#是将预计算的频率网格（rope2d_freqs_grid）与模型的注意力机制结合的核心步骤，用于让模型在计算注意力权重时感知输入序列的空间位置关系
 def apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, pad_to_multiplier, rope2d_normalized_by_hw, scale_ind):
     qk = torch.stack((q, k), dim=0)  #(2, batch_size, heads, seq_len, head_dim)
     device_type = qk.device.type
@@ -116,7 +117,7 @@ def apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, pad_to_multiplier,
         q, k = qk.unbind(dim=0) # (batch_size, heads, seq_len, head_dim)
     return q, k
 
-
+#快速RMS归一化层，用来稳定神经网络中间层的特征分布，减少不同维度特征的幅度差异
 class FastRMSNorm(nn.Module):
     def __init__(self, C, eps=1e-6, elementwise_affine=True):
         super().__init__()
@@ -135,10 +136,11 @@ class FastRMSNorm(nn.Module):
     def extra_repr(self) -> str:
         return f'C={self.C}, eps={self.eps:g}, elementwise_affine={self.elementwise_affine}'
 
-
+#参数p：dropout 概率（取值范围[0,1]），表示随机将输入元素置为 0 的概率
+#若p > 0：返回nn.Dropout(p, inplace=True)，即启用 dropout，且操作在原张量上进行（inplace=True节省内存）
+#若p = 0：返回nn.Identity()（恒等层），即不进行任何操作，避免无效计算
 def get_dropout_layer(p):
     return nn.Dropout(p, inplace=True) if p > 0 else nn.Identity()
-
 
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_mlp=False):
@@ -173,7 +175,7 @@ class FFN(nn.Module):
     def extra_repr(self) -> str:
         return f'fused_mlp={self.fused_mlp_func is not None}'
 
-
+#基于 SwiGLU 激活函数的前馈网络（FFNSwiGLU），是Transformer架构中 FFN（前馈网络）的一种变体，通过改进激活函数提升模型的表达能力和计算效率
 class FFNSwiGLU(nn.Module):
     def __init__(self, in_features, hidden_features, out_features=None, drop=0., fused_mlp=False):
         super().__init__()
