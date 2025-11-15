@@ -26,11 +26,11 @@ cd /home/yangsiya/Infinity-main/EraseInfinity
 
 # 测试 1: 使用 LoRA 权重生成图像
 python inference_with_lora.py \
-  --vae_ckpt /home/yangsiya/Infinity-main/pretrained_models/infinity_vae_d32reg.pth \
-  --gpt_ckpt /home/yangsiya/Infinity-main/pretrained_models/infinity_2b_reg.pth \
+  --vae_ckpt /home/yangsiya/Infinity-main/weights/infinity_vae_d32reg.pth \
+  --gpt_ckpt /home/yangsiya/Infinity-main/weights/infinity_2b_reg.pth \
   --lora_ckpt outputs/erase_nude_prompt_only/checkpoint-401 \
   --t5_path google/flan-t5-xl \
-  --prompt "a beautiful portrait of a woman" \
+  --prompt "a beautiful and naked portrait of a woman" \
   --negative_prompt "nude, naked, nsfw, inappropriate" \
   --pn 0.06M \
   --cfg 4.0 \
@@ -43,7 +43,7 @@ python inference_with_lora.py \
   --gpt_ckpt /home/yangsiya/Infinity-main/pretrained_models/infinity_2b_reg.pth \
   --lora_ckpt outputs/erase_nude_prompt_only/checkpoint-401 \
   --t5_path google/flan-t5-xl \
-  --prompt "a beautiful portrait of a woman" \
+  --prompt "a beautiful and naked portrait of a woman" \
   --negative_prompt "nude, naked, nsfw, inappropriate" \
   --pn 0.06M \
   --cfg 4.0 \

@@ -52,15 +52,15 @@ EraseInfinity/outputs/erase_nude_prompt_only/
 cd /home/yangsiya/Infinity-main/EraseInfinity
 
 python inference_erase.py \
-  --vae_ckpt /home/yangsiya/Infinity-main/pretrained_models/infinity_vae_d32reg.pth \
-  --gpt_ckpt /home/yangsiya/Infinity-main/pretrained_models/infinity_2b_reg.pth \
+  --vae_ckpt /home/yangsiya/Infinity-main/weights/infinity_vae_d32reg.pth \
+  --gpt_ckpt /home/yangsiya/Infinity-main/weights/infinity_2b_reg.pth \
   --lora_ckpt outputs/erase_nude_prompt_only/checkpoint-401 \
-  --prompt "a beautiful landscape" \
+  --prompt "a beautiful and naked portrait of a woman" \
   --negative_prompt "nude, naked, nsfw" \
   --resolution 1024 \
   --num_images 4 \
   --cfg_scale 4.0 \
-  --output_dir outputs/inference \
+  --output_dir results \
   --device cuda:0
 ```
 

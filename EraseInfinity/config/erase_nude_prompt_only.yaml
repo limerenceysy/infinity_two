@@ -19,12 +19,7 @@ use_lora: true
 lora_rank: 8
 lora_alpha: 8
 lora_dropout: 0.0
-# 目标模块：只针对 CrossAttention.proj 层（推荐）
-lora_target_modules:
-  - "ca.proj"  # 只匹配 Cross-Attention 的投影层（推荐用于概念擦除）
-  # 如果想微调其他模块，可以取消注释：
-  # - "ca.mat_qkv"      # Cross-Attention 的 QKV 矩阵
-  # - "sa.proj"         # Self-Attention 的投影层（通常不需要）
+
 
 # ==================== Prompt-Only 数据配置 ====================
 # ✓ 不需要真实nude图像！

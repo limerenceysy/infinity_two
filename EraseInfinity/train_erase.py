@@ -164,7 +164,10 @@ def build_models(config: dict, device: torch.device):
             self.model_init_device = 'cpu'
             
             # 模型架构参数
-            self.model = config.get('model_name', '2bc8')
+            # 从 checkpoint 文件名推断模型名称
+            gpt_ckpt_name = os.path.basename(config['gpt_ckpt'])  # infinity_2b_reg.pth
+            model_name = gpt_ckpt_name.replace('.pth', '').replace('_reg', '')  # infinity_2b
+            self.model = config.get('model_name', model_name)
             self.pn = config.get('pn', '0.06M')
             self.always_training_scales = config.get('always_training_scales', 20)
             
@@ -302,22 +305,16 @@ def build_models(config: dict, device: torch.device):
             # 默认配置：可注释/取消注释来选择要微调的部分
             target_modules = [
                 # Cross-Attention 相关（推荐，用于概念擦除）
-                "ca.proj",           # Cross-Attention 的投影层（推荐）
-                # "ca.mat_qkv",      # Cross-Attention 的 QKV 矩阵
-                # "ca.mat_q",        # Cross-Attention 的 Q 矩阵
-                # "ca.mat_kv",       # Cross-Attention 的 KV 矩阵
+                "ca.proj",           # Cross-Attention 的投影层
+                 "ca.mat_q",        # Cross-Attention 的 Q 矩阵
+                 "ca.mat_kv",       # Cross-Attention 的 KV 矩阵
                 
                 # Self-Attention 相关（通常不需要）
-                # "sa.proj",         # Self-Attention 的投影层
-                # "attn.proj",       # 通用注意力投影层
+                # "sa.mat_qkv",  
                 
                 # Feed-Forward Network 相关（通常不需要）
                 # "ffn.fc1",         # Feed-Forward 第一层
                 # "ffn.fc2",         # Feed-Forward 第二层
-                
-                # 其他模块（通常不需要）
-                # "word_embed",      # 词嵌入层
-                # "lvl_embed",       # 层级嵌入层
             ]
             print(f"\nUsing default target_modules: {target_modules}")
         
@@ -988,6 +985,9 @@ def main():
     # 用于确定loss曲线图片编号
     plot_index = None
     
+    # checkpoint计数器：用于顺序命名checkpoint-1, checkpoint-2等
+    checkpoint_counter = 0
+    
     for epoch in range(first_epoch, num_train_epochs):
         avg_loss = train_one_epoch(
             epoch=epoch,
@@ -1015,7 +1015,9 @@ def main():
         
         # 保存 checkpoint（每 save_steps 步或每个 epoch 结束时）
         if (global_step + 1) % save_steps == 0 or (epoch + 1) == num_train_epochs:
-            save_path = os.path.join(output_dir, f"checkpoint-{global_step+1}")
+            # 使用顺序编号：checkpoint-1, checkpoint-2, ...
+            checkpoint_counter += 1
+            save_path = os.path.join(output_dir, f"checkpoint-{checkpoint_counter}")
             # 创建目录（如果不存在）
             os.makedirs(save_path, exist_ok=True)
             
@@ -1061,8 +1063,8 @@ def main():
                             print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as .bin")
                         
                         # 保存 config
+                        import json
                         if hasattr(model, 'peft_config'):
-                            import json
                             # 将 peft_config 转换为可序列化的格式
                             peft_config_dict = {}
                             for adapter_name, config_obj in model.peft_config.items():
@@ -1075,20 +1077,83 @@ def main():
                                     peft_config_dict[adapter_name] = config_dict
                                 else:
                                     peft_config_dict[adapter_name] = str(config_obj)
-                            with open(os.path.join(save_path, "adapter_config.json"), "w") as f:
-                                json.dump(peft_config_dict, f, indent=2)
+                            
+                            # 确保配置是完整的（如果不是字典格式，则创建完整配置）
+                            if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
+                                # 如果已经是字典格式，直接使用
+                                final_config = peft_config_dict
+                            else:
+                                # 从peft_config中提取target_modules
+                                target_modules_list = []
+                                if hasattr(model, 'peft_config') and len(model.peft_config) > 0:
+                                    first_config = list(model.peft_config.values())[0]
+                                    if hasattr(first_config, 'target_modules'):
+                                        target_modules_list = list(first_config.target_modules) if isinstance(first_config.target_modules, (list, set)) else [first_config.target_modules]
+                                
+                                # 如果无法从peft_config获取，则从config中获取
+                                if not target_modules_list:
+                                    target_modules_list = config.get('lora_target_modules', [])
+                                
+                                # 创建完整配置
+                                final_config = {
+                                    "default": {
+                                        "peft_type": "LORA",
+                                        "task_type": "CAUSAL_LM",
+                                        "inference_mode": False,
+                                        "r": config.get('lora_rank', 8),
+                                        "lora_alpha": config.get('lora_alpha', 8),
+                                        "lora_dropout": config.get('lora_dropout', 0.0),
+                                        "target_modules": target_modules_list,
+                                        "bias": "none",
+                                        "fan_in_fan_out": False,
+                                        "init_lora_weights": True,
+                                        "modules_to_save": None,
+                                        "layers_to_transform": None,
+                                        "layers_pattern": None,
+                                        "rank_pattern": {},
+                                        "alpha_pattern": {},
+                                        "base_model_name_or_path": None,
+                                        "revision": None,
+                                        "auto_mapping": None,
+                                    }
+                                }
+                            
+                            # 确保JSON可以正确序列化，写入文件
+                            config_file_path = os.path.join(save_path, "adapter_config.json")
+                            with open(config_file_path, "w", encoding='utf-8') as f:
+                                json.dump(final_config, f, indent=2, ensure_ascii=False)
                             print(f"  ✓ Saved adapter_config.json")
                         else:
-                            # 如果没有 peft_config，创建一个基本的 config
-                            import json
-                            basic_config = {
-                                "peft_type": "LORA",
-                                "task_type": "CAUSAL_LM",
-                                "inference_mode": False,
+                            # 如果没有 peft_config，创建一个完整的 config
+                            # 从config中获取target_modules
+                            target_modules_list = config.get('lora_target_modules', [])
+                            
+                            complete_config = {
+                                "default": {
+                                    "peft_type": "LORA",
+                                    "task_type": "CAUSAL_LM",
+                                    "inference_mode": False,
+                                    "r": config.get('lora_rank', 8),
+                                    "lora_alpha": config.get('lora_alpha', 8),
+                                    "lora_dropout": config.get('lora_dropout', 0.0),
+                                    "target_modules": target_modules_list,
+                                    "bias": "none",
+                                    "fan_in_fan_out": False,
+                                    "init_lora_weights": True,
+                                    "modules_to_save": None,
+                                    "layers_to_transform": None,
+                                    "layers_pattern": None,
+                                    "rank_pattern": {},
+                                    "alpha_pattern": {},
+                                    "base_model_name_or_path": None,
+                                    "revision": None,
+                                    "auto_mapping": None,
+                                }
                             }
-                            with open(os.path.join(save_path, "adapter_config.json"), "w") as f:
-                                json.dump(basic_config, f, indent=2)
-                            print(f"  ✓ Saved basic adapter_config.json")
+                            config_file_path = os.path.join(save_path, "adapter_config.json")
+                            with open(config_file_path, "w", encoding='utf-8') as f:
+                                json.dump(complete_config, f, indent=2, ensure_ascii=False)
+                            print(f"  ✓ Saved complete adapter_config.json")
                 except Exception as e:
                     print(f"Error saving LoRA weights: {e}")
                     import traceback
@@ -1173,16 +1238,71 @@ def main():
                             peft_config_dict[adapter_name] = config_dict
                         else:
                             peft_config_dict[adapter_name] = str(config_obj)
-                    with open(os.path.join(lora_final_path, "adapter_config.json"), "w") as f:
-                        json.dump(peft_config_dict, f, indent=2)
+                    
+                    # 确保配置是完整的
+                    if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
+                        final_config = peft_config_dict
+                    else:
+                        # 从peft_config中提取target_modules
+                        target_modules_list = []
+                        if hasattr(model, 'peft_config') and len(model.peft_config) > 0:
+                            first_config = list(model.peft_config.values())[0]
+                            if hasattr(first_config, 'target_modules'):
+                                target_modules_list = list(first_config.target_modules) if isinstance(first_config.target_modules, (list, set)) else [first_config.target_modules]
+                        
+                        final_config = {
+                            "default": {
+                                "peft_type": "LORA",
+                                "task_type": "CAUSAL_LM",
+                                "inference_mode": False,
+                                "r": config.get('lora_rank', 8),
+                                "lora_alpha": config.get('lora_alpha', 8),
+                                "lora_dropout": config.get('lora_dropout', 0.0),
+                                "target_modules": target_modules_list,
+                                "bias": "none",
+                                "fan_in_fan_out": False,
+                                "init_lora_weights": True,
+                                "modules_to_save": None,
+                                "layers_to_transform": None,
+                                "layers_pattern": None,
+                                "rank_pattern": {},
+                                "alpha_pattern": {},
+                                "base_model_name_or_path": None,
+                                "revision": None,
+                                "auto_mapping": None,
+                            }
+                        }
+                    
+                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
+                    with open(config_file_path, "w", encoding='utf-8') as f:
+                        json.dump(final_config, f, indent=2, ensure_ascii=False)
                 else:
-                    basic_config = {
-                        "peft_type": "LORA",
-                        "task_type": "CAUSAL_LM",
-                        "inference_mode": False,
+                    # 如果没有 peft_config，创建一个完整的 config
+                    complete_config = {
+                        "default": {
+                            "peft_type": "LORA",
+                            "task_type": "CAUSAL_LM",
+                            "inference_mode": False,
+                            "r": config.get('lora_rank', 8),
+                            "lora_alpha": config.get('lora_alpha', 8),
+                            "lora_dropout": config.get('lora_dropout', 0.0),
+                            "target_modules": config.get('lora_target_modules', []),
+                            "bias": "none",
+                            "fan_in_fan_out": False,
+                            "init_lora_weights": True,
+                            "modules_to_save": None,
+                            "layers_to_transform": None,
+                            "layers_pattern": None,
+                            "rank_pattern": {},
+                            "alpha_pattern": {},
+                            "base_model_name_or_path": None,
+                            "revision": None,
+                            "auto_mapping": None,
+                        }
                     }
-                    with open(os.path.join(lora_final_path, "adapter_config.json"), "w") as f:
-                        json.dump(basic_config, f, indent=2)
+                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
+                    with open(config_file_path, "w", encoding='utf-8') as f:
+                        json.dump(complete_config, f, indent=2, ensure_ascii=False)
                 
                 print(f"Final LoRA model saved manually to {lora_final_path}")
             except Exception as e2:

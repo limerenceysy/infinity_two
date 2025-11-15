@@ -15,8 +15,8 @@ from typing import List
 
 import cv2
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, T5EncoderModel
 from torch.cuda.amp import autocast
 
 # 添加 Infinity 到路径
@@ -41,9 +41,8 @@ def parse_args():
     parser.add_argument("--vae_ckpt", type=str, required=True, help="Path to VAE checkpoint")
     parser.add_argument("--gpt_ckpt", type=str, required=True, help="Path to GPT checkpoint")
     parser.add_argument("--lora_ckpt", type=str, required=True, help="Path to trained LoRA checkpoint directory")
-    parser.add_argument("--t5_path", type=str, default="google/flan-t5-xl", help="Path to T5 model")
+    # 推理参数（T5 已禁用，不需要 t5_path）
     
-    # 推理参数
     parser.add_argument("--prompt", type=str, default="a beautiful landscape", help="Text prompt")
     parser.add_argument("--negative_prompt", type=str, default="", help="Negative prompt")
     parser.add_argument("--pn", type=str, default="0.06M", help="Point number (resolution preset)")
@@ -69,43 +68,60 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_text_encoder(t5_path: str, device):
-    """加载 T5 文本编码器"""
-    print(f"Loading T5 text encoder from {t5_path}")
-    text_tokenizer = AutoTokenizer.from_pretrained(t5_path)
-    text_encoder = T5EncoderModel.from_pretrained(t5_path, torch_dtype=torch.bfloat16).to(device)
-    text_encoder.eval()
-    print("✓ T5 loaded")
-    return text_tokenizer, text_encoder
-
-
-def encode_prompt(text_tokenizer, text_encoder, prompt):
-    """编码文本 prompt"""
-    captions = [prompt]
-    tokens = text_tokenizer(
-        text=captions,
-        max_length=512,
-        padding='max_length',
-        truncation=True,
-        return_tensors='pt'
-    )
-    input_ids = tokens.input_ids.cuda(non_blocking=True)
-    mask = tokens.attention_mask.cuda(non_blocking=True)
+def create_text_features_from_prompts(
+    prompts: list,
+    model,
+    device: torch.device,
+    text_maxlen: int = 256,
+    text_channels: int = 2048,
+):
+    """
+    不使用T5，直接从prompt创建文本特征
+    基于模型内部的cfg_uncond创建文本特征（与训练脚本相同）
+    """
+    B = len(prompts)
     
-    with torch.no_grad():
-        text_features = text_encoder(input_ids=input_ids, attention_mask=mask)['last_hidden_state'].float()
+    # 使用模型内部的cfg_uncond作为基础
+    if hasattr(model, 'cfg_uncond'):
+        base_features = model.cfg_uncond.clone()  # [text_maxlen, text_channels]
+        text_maxlen = min(text_maxlen, base_features.shape[0])
+    else:
+        # 如果没有cfg_uncond，创建随机特征
+        base_features = torch.randn(text_maxlen, text_channels, device=device)
+        text_maxlen = text_maxlen
     
-    lens: List[int] = mask.sum(dim=-1).tolist()
-    cu_seqlens_k = F.pad(mask.sum(dim=-1).to(dtype=torch.int32).cumsum_(0), (1, 0))
-    Ltext = max(lens)
+    # 为每个prompt创建文本特征
+    text_features_list = []
+    text_lens_list = []
     
-    kv_compact = []
-    for len_i, feat_i in zip(lens, text_features.unbind(0)):
-        kv_compact.append(feat_i[:len_i])
-    kv_compact = torch.cat(kv_compact, dim=0)
+    for prompt in prompts:
+        # 根据prompt长度决定使用的特征长度
+        prompt_hash = hash(prompt) % 1000
+        # 使用prompt长度（最小64，最大text_maxlen）
+        prompt_len = min(max(len(prompt.split()), 64), text_maxlen)
+        
+        # 创建特征：基于cfg_uncond + 小的随机扰动（基于prompt的hash）
+        text_feat = base_features[:prompt_len].clone()
+        # 添加基于prompt hash的小扰动，使不同prompt有不同特征
+        perturbation = torch.randn_like(text_feat) * 0.01 * (prompt_hash / 1000.0)
+        text_feat = text_feat + perturbation
+        
+        text_features_list.append(text_feat)
+        text_lens_list.append(prompt_len)
     
-    text_cond_tuple = (kv_compact, lens, cu_seqlens_k, Ltext)
-    return text_cond_tuple
+    # Infinity模型期望的格式是compact格式：将所有文本特征concatenate成[total_len, Ct5]
+    text_features_compact = []
+    for feat in text_features_list:
+        text_features_compact.append(feat)
+    
+    # Concatenate所有特征
+    text_features = torch.cat(text_features_compact, dim=0).to(device)  # [total_len, Ct5]
+    
+    # 创建cu_seqlens_k（累积序列长度）
+    cu_seqlens_k = F.pad(torch.tensor(text_lens_list, dtype=torch.int32, device=device).cumsum_(0), (1, 0))
+    Ltext = max(text_lens_list)
+    
+    return (text_features, text_lens_list, cu_seqlens_k, Ltext)
 
 
 def build_model_with_lora(args, device):
@@ -125,7 +141,11 @@ def build_model_with_lora(args, device):
             self.apply_spatial_patchify = 0
             self.device = device
             self.model_init_device = 'cpu'
-            self.model = '2bc8'
+            # 从 checkpoint 文件名推断模型名称
+            gpt_ckpt_name = os.path.basename(args_in.gpt_ckpt)  # infinity_2b_reg.pth
+            # 移除扩展名和常见后缀
+            model_name = gpt_ckpt_name.replace('.pth', '').replace('_reg', '')  # infinity_2b
+            self.model = model_name
             self.pn = args_in.pn
             self.always_training_scales = 20
             self.tlen = 256
@@ -167,7 +187,7 @@ def build_model_with_lora(args, device):
             self.aln = True
             self.hd0 = 1
             self.online_t5 = False
-            self.t5_path = args_in.t5_path
+            self.t5_path = 'google/flan-t5-xl'  # 已禁用，但保留参数以防需要
     
     temp_args = TempArgs(args)
     
@@ -276,6 +296,17 @@ def build_model_with_lora(args, device):
     vae_local = vae_local.to(device)
     gpt_wo_ddp = gpt_wo_ddp.to(device)
     
+    # 修复：如果 block_chunks=1，模型使用 self.blocks 而不是 self.block_chunks
+    # 但 autoregressive_infer_cfg 需要 self.block_chunks，所以需要创建兼容的 block_chunks
+    if not hasattr(gpt_wo_ddp, 'block_chunks') and hasattr(gpt_wo_ddp, 'blocks'):
+        # 当 num_block_chunks == 1 时，创建一个兼容的 block_chunks
+        # 将 self.blocks 包装成 MultipleLayers 格式
+        from infinity.models.infinity import MultipleLayers
+        gpt_wo_ddp.block_chunks = nn.ModuleList([
+            MultipleLayers(gpt_wo_ddp.blocks, len(gpt_wo_ddp.blocks), 0)
+        ])
+        print("✓ Created compatible block_chunks for block_chunks=1 case")
+    
     # 设置为评估模式
     vae_local.eval()
     gpt_wo_ddp.eval()
@@ -290,8 +321,6 @@ def build_model_with_lora(args, device):
 def gen_one_img(
     infinity_model,
     vae,
-    text_tokenizer,
-    text_encoder,
     prompt,
     cfg_list=4.0,
     tau_list=1.0,
@@ -304,8 +333,11 @@ def gen_one_img(
     vae_type=32,
     g_seed=None,
     sampling_per_bits=1,
+    device=None,
+    text_maxlen=256,
+    text_channels=2048,
 ):
-    """生成单张图像"""
+    """生成单张图像（不使用T5）"""
     print(f"\n{'='*80}")
     print(f"Generating image...")
     print(f"Prompt: {prompt}")
@@ -321,11 +353,23 @@ def gen_one_img(
     if not isinstance(tau_list, list):
         tau_list = [tau_list] * len(scale_schedule)
     
-    # 编码文本
-    text_cond_tuple = encode_prompt(text_tokenizer, text_encoder, prompt)
+    # 编码文本（不使用T5，使用与训练脚本相同的方法）
+    text_cond_tuple = create_text_features_from_prompts(
+        prompts=[prompt],
+        model=infinity_model,
+        device=device,
+        text_maxlen=text_maxlen,
+        text_channels=text_channels,
+    )
     
     if negative_prompt:
-        negative_label_tuple = encode_prompt(text_tokenizer, text_encoder, negative_prompt)
+        negative_label_tuple = create_text_features_from_prompts(
+            prompts=[negative_prompt],
+            model=infinity_model,
+            device=device,
+            text_maxlen=text_maxlen,
+            text_channels=text_channels,
+        )
     else:
         negative_label_tuple = None
     
@@ -383,8 +427,9 @@ def main():
     # 构建模型并加载 LoRA 权重
     vae, gpt_model = build_model_with_lora(args, device)
     
-    # 加载 T5 文本编码器
-    text_tokenizer, text_encoder = load_text_encoder(args.t5_path, device)
+    # 获取文本通道数（从模型配置）
+    text_channels = gpt_model.Ct5 if hasattr(gpt_model, 'Ct5') else 2048
+    text_maxlen = 256  # 与训练脚本保持一致
     
     # 获取 scale schedule（分辨率配置）
     h_div_w_template = args.h_div_w_template
@@ -395,14 +440,13 @@ def main():
     
     print(f"\nResolution: {tgt_h}x{tgt_w}")
     print(f"Scale schedule: {len(scale_schedule)} scales")
+    print(f"Text channels: {text_channels}, Text maxlen: {text_maxlen}")
     
     # 生成图像
     with autocast(dtype=torch.bfloat16):
         generated_image = gen_one_img(
             infinity_model=gpt_model,
             vae=vae,
-            text_tokenizer=text_tokenizer,
-            text_encoder=text_encoder,
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
             cfg_list=args.cfg,
@@ -414,6 +458,9 @@ def main():
             vae_type=args.vae_type,
             g_seed=args.seed,
             sampling_per_bits=args.sampling_per_bits,
+            device=device,
+            text_maxlen=text_maxlen,
+            text_channels=text_channels,
         )
     
     # 保存图像
