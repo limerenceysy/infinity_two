@@ -1080,8 +1080,14 @@ def main():
                             
                             # 确保配置是完整的（如果不是字典格式，则创建完整配置）
                             if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
-                                # 如果已经是字典格式，直接使用
-                                final_config = peft_config_dict
+                                # 如果已经是字典格式，提取第一个适配器的配置（通常是 "default"）
+                                # PEFT 标准格式是顶层配置，不应该嵌套
+                                if "default" in peft_config_dict:
+                                    final_config = peft_config_dict["default"]
+                                else:
+                                    # 如果有多个适配器，取第一个
+                                    first_adapter = list(peft_config_dict.values())[0]
+                                    final_config = first_adapter
                             else:
                                 # 从peft_config中提取target_modules
                                 target_modules_list = []
@@ -1094,42 +1100,8 @@ def main():
                                 if not target_modules_list:
                                     target_modules_list = config.get('lora_target_modules', [])
                                 
-                                # 创建完整配置
+                                # 创建标准 PEFT 格式配置（顶层，不嵌套）
                                 final_config = {
-                                    "default": {
-                                        "peft_type": "LORA",
-                                        "task_type": "CAUSAL_LM",
-                                        "inference_mode": False,
-                                        "r": config.get('lora_rank', 8),
-                                        "lora_alpha": config.get('lora_alpha', 8),
-                                        "lora_dropout": config.get('lora_dropout', 0.0),
-                                        "target_modules": target_modules_list,
-                                        "bias": "none",
-                                        "fan_in_fan_out": False,
-                                        "init_lora_weights": True,
-                                        "modules_to_save": None,
-                                        "layers_to_transform": None,
-                                        "layers_pattern": None,
-                                        "rank_pattern": {},
-                                        "alpha_pattern": {},
-                                        "base_model_name_or_path": None,
-                                        "revision": None,
-                                        "auto_mapping": None,
-                                    }
-                                }
-                            
-                            # 确保JSON可以正确序列化，写入文件
-                            config_file_path = os.path.join(save_path, "adapter_config.json")
-                            with open(config_file_path, "w", encoding='utf-8') as f:
-                                json.dump(final_config, f, indent=2, ensure_ascii=False)
-                            print(f"  ✓ Saved adapter_config.json")
-                        else:
-                            # 如果没有 peft_config，创建一个完整的 config
-                            # 从config中获取target_modules
-                            target_modules_list = config.get('lora_target_modules', [])
-                            
-                            complete_config = {
-                                "default": {
                                     "peft_type": "LORA",
                                     "task_type": "CAUSAL_LM",
                                     "inference_mode": False,
@@ -1148,7 +1120,49 @@ def main():
                                     "base_model_name_or_path": None,
                                     "revision": None,
                                     "auto_mapping": None,
+                                    "use_rslora": False,
+                                    "megatron_config": None,
+                                    "megatron_core": "megatron.core",
+                                    "loftq_config": {},
+                                    "use_dora": False,
+                                    "layer_replication": None,
                                 }
+                            
+                            # 确保JSON可以正确序列化，写入文件
+                            config_file_path = os.path.join(save_path, "adapter_config.json")
+                            with open(config_file_path, "w", encoding='utf-8') as f:
+                                json.dump(final_config, f, indent=2, ensure_ascii=False)
+                            print(f"  ✓ Saved adapter_config.json")
+                        else:
+                            # 如果没有 peft_config，创建一个标准 PEFT 格式的 config（顶层，不嵌套）
+                            # 从config中获取target_modules
+                            target_modules_list = config.get('lora_target_modules', [])
+                            
+                            complete_config = {
+                                "peft_type": "LORA",
+                                "task_type": "CAUSAL_LM",
+                                "inference_mode": False,
+                                "r": config.get('lora_rank', 8),
+                                "lora_alpha": config.get('lora_alpha', 8),
+                                "lora_dropout": config.get('lora_dropout', 0.0),
+                                "target_modules": target_modules_list,
+                                "bias": "none",
+                                "fan_in_fan_out": False,
+                                "init_lora_weights": True,
+                                "modules_to_save": None,
+                                "layers_to_transform": None,
+                                "layers_pattern": None,
+                                "rank_pattern": {},
+                                "alpha_pattern": {},
+                                "base_model_name_or_path": None,
+                                "revision": None,
+                                "auto_mapping": None,
+                                "use_rslora": False,
+                                "megatron_config": None,
+                                "megatron_core": "megatron.core",
+                                "loftq_config": {},
+                                "use_dora": False,
+                                "layer_replication": None,
                             }
                             config_file_path = os.path.join(save_path, "adapter_config.json")
                             with open(config_file_path, "w", encoding='utf-8') as f:
@@ -1239,9 +1253,14 @@ def main():
                         else:
                             peft_config_dict[adapter_name] = str(config_obj)
                     
-                    # 确保配置是完整的
+                    # 确保配置是完整的（标准 PEFT 格式，顶层不嵌套）
                     if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
-                        final_config = peft_config_dict
+                        # 提取第一个适配器的配置（通常是 "default"）
+                        if "default" in peft_config_dict:
+                            final_config = peft_config_dict["default"]
+                        else:
+                            first_adapter = list(peft_config_dict.values())[0]
+                            final_config = first_adapter
                     else:
                         # 从peft_config中提取target_modules
                         target_modules_list = []
@@ -1250,43 +1269,15 @@ def main():
                             if hasattr(first_config, 'target_modules'):
                                 target_modules_list = list(first_config.target_modules) if isinstance(first_config.target_modules, (list, set)) else [first_config.target_modules]
                         
+                        # 创建标准 PEFT 格式配置（顶层，不嵌套）
                         final_config = {
-                            "default": {
-                                "peft_type": "LORA",
-                                "task_type": "CAUSAL_LM",
-                                "inference_mode": False,
-                                "r": config.get('lora_rank', 8),
-                                "lora_alpha": config.get('lora_alpha', 8),
-                                "lora_dropout": config.get('lora_dropout', 0.0),
-                                "target_modules": target_modules_list,
-                                "bias": "none",
-                                "fan_in_fan_out": False,
-                                "init_lora_weights": True,
-                                "modules_to_save": None,
-                                "layers_to_transform": None,
-                                "layers_pattern": None,
-                                "rank_pattern": {},
-                                "alpha_pattern": {},
-                                "base_model_name_or_path": None,
-                                "revision": None,
-                                "auto_mapping": None,
-                            }
-                        }
-                    
-                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
-                    with open(config_file_path, "w", encoding='utf-8') as f:
-                        json.dump(final_config, f, indent=2, ensure_ascii=False)
-                else:
-                    # 如果没有 peft_config，创建一个完整的 config
-                    complete_config = {
-                        "default": {
                             "peft_type": "LORA",
                             "task_type": "CAUSAL_LM",
                             "inference_mode": False,
                             "r": config.get('lora_rank', 8),
                             "lora_alpha": config.get('lora_alpha', 8),
                             "lora_dropout": config.get('lora_dropout', 0.0),
-                            "target_modules": config.get('lora_target_modules', []),
+                            "target_modules": target_modules_list,
                             "bias": "none",
                             "fan_in_fan_out": False,
                             "init_lora_weights": True,
@@ -1298,7 +1289,44 @@ def main():
                             "base_model_name_or_path": None,
                             "revision": None,
                             "auto_mapping": None,
+                            "use_rslora": False,
+                            "megatron_config": None,
+                            "megatron_core": "megatron.core",
+                            "loftq_config": {},
+                            "use_dora": False,
+                            "layer_replication": None,
                         }
+                    
+                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
+                    with open(config_file_path, "w", encoding='utf-8') as f:
+                        json.dump(final_config, f, indent=2, ensure_ascii=False)
+                else:
+                    # 如果没有 peft_config，创建一个标准 PEFT 格式的 config（顶层，不嵌套）
+                    complete_config = {
+                        "peft_type": "LORA",
+                        "task_type": "CAUSAL_LM",
+                        "inference_mode": False,
+                        "r": config.get('lora_rank', 8),
+                        "lora_alpha": config.get('lora_alpha', 8),
+                        "lora_dropout": config.get('lora_dropout', 0.0),
+                        "target_modules": config.get('lora_target_modules', []),
+                        "bias": "none",
+                        "fan_in_fan_out": False,
+                        "init_lora_weights": True,
+                        "modules_to_save": None,
+                        "layers_to_transform": None,
+                        "layers_pattern": None,
+                        "rank_pattern": {},
+                        "alpha_pattern": {},
+                        "base_model_name_or_path": None,
+                        "revision": None,
+                        "auto_mapping": None,
+                        "use_rslora": False,
+                        "megatron_config": None,
+                        "megatron_core": "megatron.core",
+                        "loftq_config": {},
+                        "use_dora": False,
+                        "layer_replication": None,
                     }
                     config_file_path = os.path.join(lora_final_path, "adapter_config.json")
                     with open(config_file_path, "w", encoding='utf-8') as f:

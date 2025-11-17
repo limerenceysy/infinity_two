@@ -64,6 +64,10 @@ def parse_args():
     # LoRA 相关
     parser.add_argument("--use_lora", action="store_true", default=True, help="Use LoRA weights")
     parser.add_argument("--no_lora", action="store_true", help="Disable LoRA (compare with original model)")
+    parser.add_argument("--lora_target_modules", type=str, nargs="+", default=None, 
+                        help="Target modules for LoRA (e.g., ca.proj ca.mat_q ca.mat_kv). If not specified, will auto-detect from adapter_config.json")
+    parser.add_argument("--lora_rank", type=int, default=8, help="LoRA rank (default: 8)")
+    parser.add_argument("--lora_alpha", type=int, default=8, help="LoRA alpha (default: 8)")
     
     return parser.parse_args()
 
@@ -122,6 +126,67 @@ def create_text_features_from_prompts(
     Ltext = max(text_lens_list)
     
     return (text_features, text_lens_list, cu_seqlens_k, Ltext)
+
+
+def detect_lora_target_modules(lora_ckpt_dir, lora_state_dict=None, fallback_modules=None):
+    """
+    自动检测 LoRA target_modules
+    
+    优先级:
+    1. 从 adapter_config.json 读取
+    2. 从权重文件的 key 推断
+    3. 使用 fallback_modules 或默认值
+    """
+    import json
+    
+    # 方法 1: 尝试从 adapter_config.json 读取
+    if os.path.isdir(lora_ckpt_dir):
+        config_path = os.path.join(lora_ckpt_dir, "adapter_config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    if 'target_modules' in config:
+                        target_modules = config['target_modules']
+                        print(f"✓ Detected target_modules from adapter_config.json: {target_modules}")
+                        return config.get('r', 8), config.get('lora_alpha', 8), target_modules
+            except Exception as e:
+                print(f"Warning: Failed to read adapter_config.json: {e}")
+    
+    # 方法 2: 从权重文件的 key 推断
+    if lora_state_dict is not None:
+        detected_modules = set()
+        for key in lora_state_dict.keys():
+            # LoRA 权重格式: base_model.model.xxx.lora_A.default.weight
+            # 或: blocks.0.ca.proj.lora_A.default.weight
+            if 'lora_A' in key or 'lora_B' in key:
+                # 提取模块名称
+                parts = key.split('.')
+                # 寻找 ca.proj, ca.mat_q, ca.mat_kv 等模式
+                for i in range(len(parts) - 1):
+                    if parts[i] == 'ca' and parts[i+1] in ['proj', 'mat_q', 'mat_kv']:
+                        detected_modules.add(f"ca.{parts[i+1]}")
+                    elif parts[i] == 'sa' and parts[i+1] in ['proj', 'mat_qkv']:
+                        detected_modules.add(f"sa.{parts[i+1]}")
+                    elif parts[i] == 'ffn' and parts[i+1] in ['fc1', 'fc2']:
+                        detected_modules.add(f"ffn.{parts[i+1]}")
+        
+        if detected_modules:
+            target_modules = sorted(list(detected_modules))
+            print(f"✓ Inferred target_modules from weight keys: {target_modules}")
+            # 假设默认 rank=8, alpha=8
+            return 8, 8, target_modules
+    
+    # 方法 3: 使用 fallback
+    if fallback_modules:
+        print(f"⚠ Using fallback target_modules: {fallback_modules}")
+        return 8, 8, fallback_modules
+    
+    # 默认值
+    default_modules = ["ca.proj"]
+    print(f"⚠ WARNING: Could not detect target_modules, using default: {default_modules}")
+    print(f"   If your checkpoint uses different modules, please specify --lora_target_modules")
+    return 8, 8, default_modules
 
 
 def build_model_with_lora(args, device):
@@ -217,6 +282,7 @@ def build_model_with_lora(args, device):
         print(f"Loading LoRA weights from {args.lora_ckpt}")
         print(f"{'='*80}")
         
+        #检查路径是否为目录，如果是目录，则查找adapter_model.safetensors或adapter_model.bin或trainable_params.bin
         if os.path.isdir(args.lora_ckpt):
             lora_weight_path = None
             if os.path.exists(os.path.join(args.lora_ckpt, "adapter_model.safetensors")):
@@ -231,6 +297,7 @@ def build_model_with_lora(args, device):
             else:
                 raise FileNotFoundError(f"No LoRA weights found in {args.lora_ckpt}")
         else:
+            #如果是文件，直接使用该文件路径，根据扩展名判断是否为safetensors格式
             lora_weight_path = args.lora_ckpt
             use_safetensors = lora_weight_path.endswith('.safetensors')
         
@@ -248,31 +315,72 @@ def build_model_with_lora(args, device):
         
         print(f"Loaded {len(lora_state_dict)} LoRA parameters")
         
+        # ==================== 自动检测 LoRA 配置 ====================
+        # 从命令行参数、配置文件或权重文件自动检测 target_modules
+        lora_rank, lora_alpha, target_modules = detect_lora_target_modules(
+            lora_ckpt_dir=args.lora_ckpt,
+            lora_state_dict=lora_state_dict,
+            fallback_modules=args.lora_target_modules
+        )
+        
+        # 优先使用命令行参数
+        if args.lora_target_modules is not None:
+            target_modules = args.lora_target_modules
+            print(f"✓ Using target_modules from command line: {target_modules}")
+        
+        # 使用命令行参数覆盖 rank 和 alpha（如果指定）
+        lora_rank = args.lora_rank if hasattr(args, 'lora_rank') else lora_rank
+        lora_alpha = args.lora_alpha if hasattr(args, 'lora_alpha') else lora_alpha
+        
+        print(f"\nLoRA Configuration:")
+        print(f"  - rank: {lora_rank}")
+        print(f"  - alpha: {lora_alpha}")
+        print(f"  - target_modules: {target_modules}")
+        print()
+        
         # 尝试使用 PEFT 加载
         try:
             from peft import PeftModel, LoraConfig, inject_adapter_in_model
+            import json
+            
+            # 添加假方法避免 PEFT 检查错误（在所有加载方式前都需要）
+            def dummy_prepare_inputs_for_generation(self, *args, **kwargs):
+                return kwargs if kwargs else {}
+            
+            if not hasattr(gpt_wo_ddp, 'prepare_inputs_for_generation'):
+                gpt_wo_ddp.prepare_inputs_for_generation = dummy_prepare_inputs_for_generation.__get__(gpt_wo_ddp, type(gpt_wo_ddp))
+                print("✓ Added prepare_inputs_for_generation method for PEFT compatibility")
             
             config_path = os.path.join(args.lora_ckpt, "adapter_config.json") if os.path.isdir(args.lora_ckpt) else None
             
             if config_path and os.path.exists(config_path):
+                # 修复配置文件格式（如果配置嵌套在 "default" 键下）
+                with open(config_path, 'r') as f:
+                    config_data = json.load(f)
+                
+                # 检查是否需要修复配置格式
+                if "default" in config_data and "peft_type" not in config_data:
+                    print("⚠ Detected nested config format, fixing adapter_config.json...")
+                    # 提取 "default" 下的配置到顶层
+                    fixed_config = config_data["default"]
+                    # 保存修复后的配置
+                    with open(config_path, 'w') as f:
+                        json.dump(fixed_config, f, indent=2)
+                    print("✓ Fixed adapter_config.json format")
+                
                 print("Loading LoRA using PeftModel.from_pretrained...")
                 gpt_wo_ddp = PeftModel.from_pretrained(gpt_wo_ddp, args.lora_ckpt)
             else:
                 print("Loading LoRA weights manually with PEFT...")
                 lora_config = LoraConfig(
-                    r=8,
-                    lora_alpha=8,
+                    r=lora_rank,
+                    lora_alpha=lora_alpha,
                     lora_dropout=0.0,
-                    target_modules=["ca.proj"],
+                    target_modules=target_modules,
                     bias="none",
                     task_type="CAUSAL_LM",
                     inference_mode=True,
                 )
-                
-                # 添加假方法避免错误
-                def dummy_prepare_inputs_for_generation(self, *args, **kwargs):
-                    return kwargs if kwargs else {}
-                gpt_wo_ddp.prepare_inputs_for_generation = dummy_prepare_inputs_for_generation.__get__(gpt_wo_ddp, type(gpt_wo_ddp))
                 
                 gpt_wo_ddp = inject_adapter_in_model(lora_config, gpt_wo_ddp)
                 missing, unexpected = gpt_wo_ddp.load_state_dict(lora_state_dict, strict=False)
@@ -298,14 +406,42 @@ def build_model_with_lora(args, device):
     
     # 修复：如果 block_chunks=1，模型使用 self.blocks 而不是 self.block_chunks
     # 但 autoregressive_infer_cfg 需要 self.block_chunks，所以需要创建兼容的 block_chunks
-    if not hasattr(gpt_wo_ddp, 'block_chunks') and hasattr(gpt_wo_ddp, 'blocks'):
+    # 注意：PEFT 包装后，原始模型在 base_model.model 或通过 get_base_model() 访问
+    
+    # 获取实际的 Infinity 模型（可能被 PEFT 包装）
+    actual_model = gpt_wo_ddp
+    is_peft_wrapped = False
+    
+    if hasattr(gpt_wo_ddp, 'get_base_model'):
+        # PEFT 提供的标准方法
+        actual_model = gpt_wo_ddp.get_base_model()
+        is_peft_wrapped = True
+        print("✓ Detected PEFT-wrapped model, accessing base model via get_base_model()")
+    elif hasattr(gpt_wo_ddp, 'base_model') and hasattr(gpt_wo_ddp.base_model, 'model'):
+        # 备选方法：直接访问
+        actual_model = gpt_wo_ddp.base_model.model
+        is_peft_wrapped = True
+        print("✓ Detected PEFT-wrapped model, accessing base_model.model")
+    
+    # 在实际模型上添加 block_chunks（如果需要）
+    if not hasattr(actual_model, 'block_chunks') and hasattr(actual_model, 'blocks'):
         # 当 num_block_chunks == 1 时，创建一个兼容的 block_chunks
         # 将 self.blocks 包装成 MultipleLayers 格式
         from infinity.models.infinity import MultipleLayers
-        gpt_wo_ddp.block_chunks = nn.ModuleList([
-            MultipleLayers(gpt_wo_ddp.blocks, len(gpt_wo_ddp.blocks), 0)
+        actual_model.block_chunks = nn.ModuleList([
+            MultipleLayers(actual_model.blocks, len(actual_model.blocks), 0)
         ])
         print("✓ Created compatible block_chunks for block_chunks=1 case")
+    
+    # 如果是 PEFT 包装的模型，确保包装器能访问到所有必要的属性
+    # PEFT 的 __getattr__ 会自动转发，但我们可以显式添加关键属性以确保兼容性
+    if is_peft_wrapped:
+        # 关键：确保 PEFT 包装器能访问 block_chunks
+        critical_attrs = ['block_chunks', 'num_block_chunks', 'num_blocks_in_a_chunk']
+        for attr in critical_attrs:
+            if hasattr(actual_model, attr) and not hasattr(gpt_wo_ddp, attr):
+                setattr(gpt_wo_ddp, attr, getattr(actual_model, attr))
+        print("✓ Ensured PEFT wrapper has access to critical attributes")
     
     # 设置为评估模式
     vae_local.eval()
@@ -468,9 +604,20 @@ def main():
         save_path = args.save_file
     else:
         import hashlib
+        from datetime import datetime
+        
+        # 生成唯一的文件名
         prompt_hash = hashlib.md5(args.prompt.encode('utf-8')).hexdigest()[:8]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 添加配置信息使文件名更有描述性
         lora_suffix = "_lora" if (args.use_lora and not args.no_lora) else "_no_lora"
-        save_path = os.path.join(args.output_dir, f"{prompt_hash}{lora_suffix}.jpg")
+        seed_suffix = f"_seed{args.seed}" if args.seed is not None else ""
+        cfg_suffix = f"_cfg{args.cfg:.1f}"
+        
+        # 组合文件名: 时间戳_prompt哈希_配置信息
+        filename = f"{timestamp}_{prompt_hash}{lora_suffix}{cfg_suffix}{seed_suffix}.jpg"
+        save_path = os.path.join(args.output_dir, filename)
     
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     cv2.imwrite(save_path, generated_image.cpu().numpy())

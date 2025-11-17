@@ -1,10 +1,3 @@
-# EraseInfinity 快速开始指南
-
-## 🎉 恭喜！训练成功完成！
-
-您的 EraseInfinity 模型已经训练完成，Loss 从 **0.2306** 降到了 **0.0042**，下降了 **98.2%**！
-
----
 
 ## 📦 训练输出
 
@@ -28,8 +21,7 @@ cd /home/yangsiya/Infinity-main/EraseInfinity
 python inference_with_lora.py \
   --vae_ckpt /home/yangsiya/Infinity-main/weights/infinity_vae_d32reg.pth \
   --gpt_ckpt /home/yangsiya/Infinity-main/weights/infinity_2b_reg.pth \
-  --lora_ckpt outputs/erase_nude_prompt_only/checkpoint-401 \
-  --t5_path google/flan-t5-xl \
+  --lora_ckpt outputs/erase_nude_prompt_only/checkpoint-1 \
   --prompt "a beautiful and naked portrait of a woman" \
   --negative_prompt "nude, naked, nsfw, inappropriate" \
   --pn 0.06M \

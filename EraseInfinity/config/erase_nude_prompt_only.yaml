@@ -35,7 +35,7 @@ resolution: 256  # Infinity 训练分辨率 (pn=0.06M)
 pn: "0.06M"      # Infinity pixel number 配置
 train_batch_size: 4
 gradient_accumulation_steps: 1
-num_train_epochs: 9  # 训练10轮（如果设置了max_train_steps，会基于它计算实际epoch数）
+num_train_epochs: 20  # 训练10轮（如果设置了max_train_steps，会基于它计算实际epoch数）
 max_train_steps: 0  # 0表示使用num_train_epochs，否则优先使用max_train_steps
 learning_rate: 1e-3
 lr_scheduler: "constant"
