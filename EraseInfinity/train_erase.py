@@ -79,7 +79,7 @@ def parse_args():
     parser.add_argument(
         "--local_rank",
         type=int,
-        default=3,  # 默认使用 1 号 GPU
+        default=0,  # 默认使用 1 号 GPU
         help="Local rank for distributed training"
     )
     return parser.parse_args()
@@ -306,8 +306,8 @@ def build_models(config: dict, device: torch.device):
             target_modules = [
                 # Cross-Attention 相关（推荐，用于概念擦除）
                 "ca.proj",           # Cross-Attention 的投影层
-                 "ca.mat_q",        # Cross-Attention 的 Q 矩阵
-                 "ca.mat_kv",       # Cross-Attention 的 KV 矩阵
+                 #"ca.mat_q",        # Cross-Attention 的 Q 矩阵
+                 #"ca.mat_kv",       # Cross-Attention 的 KV 矩阵
                 
                 # Self-Attention 相关（通常不需要）
                 # "sa.mat_qkv",  
@@ -943,24 +943,13 @@ def main():
     dataloader = build_dataloader(config)
     
     # ==================== 训练循环 ====================
-    # 仿照 EraseAnything/train_flux_lora.py 的训练逻辑
-    # 基于 max_train_steps 计算实际的 epoch 数
-    num_epochs_config = config.get('num_train_epochs', 1)
-    max_train_steps_config = config.get('max_train_steps', 200)
+    # 只使用 num_train_epochs 控制训练，移除 max_train_steps 限制
+    num_train_epochs = config.get('num_train_epochs', 15)
     gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
-    save_steps = config.get('save_steps', 200)
     
     # 计算每个 epoch 的步数
     num_update_steps_per_epoch = math.ceil(len(dataloader) / gradient_accumulation_steps)
-    
-    # 如果指定了 max_train_steps，优先使用它来计算 epoch 数
-    # 否则使用 num_train_epochs
-    if max_train_steps_config > 0:
-        num_train_epochs = math.ceil(max_train_steps_config / num_update_steps_per_epoch)
-        max_train_steps = max_train_steps_config
-    else:
-        num_train_epochs = num_epochs_config
-        max_train_steps = num_train_epochs * num_update_steps_per_epoch
+    total_train_steps = num_train_epochs * num_update_steps_per_epoch
     
     print("=" * 80)
     print("Starting training...")
@@ -969,7 +958,7 @@ def main():
     print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     print(f"Update steps per epoch: {num_update_steps_per_epoch}")
     print(f"Total epochs: {num_train_epochs}")
-    print(f"Max steps: {max_train_steps}")
+    print(f"Total training steps: {total_train_steps}")
     print("=" * 80)
     
     global_step = 0
@@ -984,9 +973,6 @@ def main():
     
     # 用于确定loss曲线图片编号
     plot_index = None
-    
-    # checkpoint计数器：用于顺序命名checkpoint-1, checkpoint-2等
-    checkpoint_counter = 0
     
     for epoch in range(first_epoch, num_train_epochs):
         avg_loss = train_one_epoch(
@@ -1003,7 +989,7 @@ def main():
             global_step=global_step,
         )
         
-        print(f"Epoch {epoch} completed. Average loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch+1}/{num_train_epochs} completed. Average loss: {avg_loss:.4f}")
         
         # 每个epoch结束时绘制loss曲线
         plot_index = plot_loss_curves(
@@ -1013,239 +999,83 @@ def main():
             plot_index=plot_index,  # 第一次调用时自动查找编号，后续使用相同编号
         )
         
-        # 保存 checkpoint（每 save_steps 步或每个 epoch 结束时）
-        if (global_step + 1) % save_steps == 0 or (epoch + 1) == num_train_epochs:
-            # 使用顺序编号：checkpoint-1, checkpoint-2, ...
-            checkpoint_counter += 1
-            save_path = os.path.join(output_dir, f"checkpoint-{checkpoint_counter}")
-            # 创建目录（如果不存在）
-            os.makedirs(save_path, exist_ok=True)
-            
-            # 保存模型
-            if config.get('use_lora', True):
-                # 保存 LoRA 权重
-                try:
-                    from peft import get_peft_model_state_dict
-                    # 检查模型是否有 peft_config 属性
-                    if hasattr(model, 'peft_config'):
-                        model_lora_state_dict = get_peft_model_state_dict(model)
-                    else:
-                        # 如果没有 peft_config，手动提取 LoRA 权重
-                        print("Warning: Model doesn't have peft_config, manually extracting LoRA weights...")
-                        model_lora_state_dict = {}
-                        for name, param in model.named_parameters():
-                            if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
-                                model_lora_state_dict[name] = param.data.clone()
-                        
-                        if len(model_lora_state_dict) == 0:
-                            print("Warning: No LoRA weights found! Saving all trainable parameters...")
-                            # 如果没有找到 LoRA 权重，保存所有可训练参数
-                            for name, param in model.named_parameters():
-                                if param.requires_grad:
-                                    model_lora_state_dict[name] = param.data.clone()
-                    
-                    if len(model_lora_state_dict) == 0:
-                        print("Warning: No weights to save!")
-                    else:
-                        # 保存为 safetensors 格式（如果可用）
-                        try:
-                            from safetensors.torch import save_file
-                            save_file(model_lora_state_dict, os.path.join(save_path, "adapter_model.safetensors"))
-                            print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as safetensors")
-                        except ImportError:
-                            torch.save(model_lora_state_dict, os.path.join(save_path, "adapter_model.bin"))
-                            print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as .bin")
-                        except Exception as e:
-                            # 如果safetensors保存失败，使用torch.save
-                            print(f"Warning: Failed to save as safetensors: {e}")
-                            print("Falling back to torch.save...")
-                            torch.save(model_lora_state_dict, os.path.join(save_path, "adapter_model.bin"))
-                            print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as .bin")
-                        
-                        # 保存 config
-                        import json
-                        if hasattr(model, 'peft_config'):
-                            # 将 peft_config 转换为可序列化的格式
-                            peft_config_dict = {}
-                            for adapter_name, config_obj in model.peft_config.items():
-                                if hasattr(config_obj, 'to_dict'):
-                                    config_dict = config_obj.to_dict()
-                                    # 将所有set类型转换为list
-                                    for key, value in config_dict.items():
-                                        if isinstance(value, set):
-                                            config_dict[key] = list(value)
-                                    peft_config_dict[adapter_name] = config_dict
-                                else:
-                                    peft_config_dict[adapter_name] = str(config_obj)
-                            
-                            # 确保配置是完整的（如果不是字典格式，则创建完整配置）
-                            if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
-                                # 如果已经是字典格式，提取第一个适配器的配置（通常是 "default"）
-                                # PEFT 标准格式是顶层配置，不应该嵌套
-                                if "default" in peft_config_dict:
-                                    final_config = peft_config_dict["default"]
-                                else:
-                                    # 如果有多个适配器，取第一个
-                                    first_adapter = list(peft_config_dict.values())[0]
-                                    final_config = first_adapter
-                            else:
-                                # 从peft_config中提取target_modules
-                                target_modules_list = []
-                                if hasattr(model, 'peft_config') and len(model.peft_config) > 0:
-                                    first_config = list(model.peft_config.values())[0]
-                                    if hasattr(first_config, 'target_modules'):
-                                        target_modules_list = list(first_config.target_modules) if isinstance(first_config.target_modules, (list, set)) else [first_config.target_modules]
-                                
-                                # 如果无法从peft_config获取，则从config中获取
-                                if not target_modules_list:
-                                    target_modules_list = config.get('lora_target_modules', [])
-                                
-                                # 创建标准 PEFT 格式配置（顶层，不嵌套）
-                                final_config = {
-                                    "peft_type": "LORA",
-                                    "task_type": "CAUSAL_LM",
-                                    "inference_mode": False,
-                                    "r": config.get('lora_rank', 8),
-                                    "lora_alpha": config.get('lora_alpha', 8),
-                                    "lora_dropout": config.get('lora_dropout', 0.0),
-                                    "target_modules": target_modules_list,
-                                    "bias": "none",
-                                    "fan_in_fan_out": False,
-                                    "init_lora_weights": True,
-                                    "modules_to_save": None,
-                                    "layers_to_transform": None,
-                                    "layers_pattern": None,
-                                    "rank_pattern": {},
-                                    "alpha_pattern": {},
-                                    "base_model_name_or_path": None,
-                                    "revision": None,
-                                    "auto_mapping": None,
-                                    "use_rslora": False,
-                                    "megatron_config": None,
-                                    "megatron_core": "megatron.core",
-                                    "loftq_config": {},
-                                    "use_dora": False,
-                                    "layer_replication": None,
-                                }
-                            
-                            # 确保JSON可以正确序列化，写入文件
-                            config_file_path = os.path.join(save_path, "adapter_config.json")
-                            with open(config_file_path, "w", encoding='utf-8') as f:
-                                json.dump(final_config, f, indent=2, ensure_ascii=False)
-                            print(f"  ✓ Saved adapter_config.json")
-                        else:
-                            # 如果没有 peft_config，创建一个标准 PEFT 格式的 config（顶层，不嵌套）
-                            # 从config中获取target_modules
-                            target_modules_list = config.get('lora_target_modules', [])
-                            
-                            complete_config = {
-                                "peft_type": "LORA",
-                                "task_type": "CAUSAL_LM",
-                                "inference_mode": False,
-                                "r": config.get('lora_rank', 8),
-                                "lora_alpha": config.get('lora_alpha', 8),
-                                "lora_dropout": config.get('lora_dropout', 0.0),
-                                "target_modules": target_modules_list,
-                                "bias": "none",
-                                "fan_in_fan_out": False,
-                                "init_lora_weights": True,
-                                "modules_to_save": None,
-                                "layers_to_transform": None,
-                                "layers_pattern": None,
-                                "rank_pattern": {},
-                                "alpha_pattern": {},
-                                "base_model_name_or_path": None,
-                                "revision": None,
-                                "auto_mapping": None,
-                                "use_rslora": False,
-                                "megatron_config": None,
-                                "megatron_core": "megatron.core",
-                                "loftq_config": {},
-                                "use_dora": False,
-                                "layer_replication": None,
-                            }
-                            config_file_path = os.path.join(save_path, "adapter_config.json")
-                            with open(config_file_path, "w", encoding='utf-8') as f:
-                                json.dump(complete_config, f, indent=2, ensure_ascii=False)
-                            print(f"  ✓ Saved complete adapter_config.json")
-                except Exception as e:
-                    print(f"Error saving LoRA weights: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback: 保存所有可训练参数
-                    print("Falling back to saving all trainable parameters...")
-                    trainable_state_dict = {name: param.data.clone() for name, param in model.named_parameters() if param.requires_grad}
-                    torch.save(trainable_state_dict, os.path.join(save_path, "trainable_params.bin"))
-                    print(f"  ✓ Saved {len(trainable_state_dict)} trainable parameters")
-            else:
-                # 保存整个模型
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': avg_loss,
-                    'config': config,
-                }, os.path.join(save_path, "model.pth"))
-            
-            print(f"Checkpoint saved to {save_path}")
-        
         # 更新global_step（每个epoch的步数）
         global_step += num_update_steps_per_epoch
-        if global_step >= max_train_steps:
-            print(f"Reached max_train_steps ({max_train_steps}), stopping training.")
-            break
     
     # ==================== 保存最终模型 ====================
-    final_save_path = os.path.join(output_dir, "final_model.pth")
+    # 自动检测现有checkpoint编号并递增
+    import re
+    import glob
     
+    print("\n" + "=" * 80)
+    print("Saving final checkpoint...")
+    
+    # 查找现有的checkpoint目录
+    existing_checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+    checkpoint_numbers = []
+    for cp in existing_checkpoints:
+        match = re.search(r'checkpoint-(\d+)', cp)
+        if match:
+            checkpoint_numbers.append(int(match.group(1)))
+    
+    # 确定下一个checkpoint编号
+    if checkpoint_numbers:
+        next_checkpoint_num = max(checkpoint_numbers) + 1
+        print(f"Found existing checkpoints: {sorted(checkpoint_numbers)}")
+    else:
+        next_checkpoint_num = 1
+        print("No existing checkpoints found.")
+    
+    checkpoint_save_path = os.path.join(output_dir, f"checkpoint-{next_checkpoint_num}")
+    os.makedirs(checkpoint_save_path, exist_ok=True)
+    print(f"Saving to: {checkpoint_save_path}")
+    
+    # 保存模型
     if config.get('use_lora', True):
-        lora_final_path = os.path.join(output_dir, "lora_final")
-        # 创建目录（如果不存在）
-        os.makedirs(lora_final_path, exist_ok=True)
-        
-        # 尝试使用 save_pretrained，如果失败则手动保存
+        # 保存 LoRA 权重
         try:
-            if hasattr(model, 'save_pretrained'):
-                model.save_pretrained(lora_final_path)
-                print(f"Final LoRA model saved to {lora_final_path}")
+            from peft import get_peft_model_state_dict
+            import json
+            
+            # 提取 LoRA 权重
+            if hasattr(model, 'peft_config'):
+                model_lora_state_dict = get_peft_model_state_dict(model)
             else:
-                raise AttributeError("Model doesn't have save_pretrained method")
-        except Exception as e:
-            print(f"Warning: save_pretrained failed: {e}")
-            print("Falling back to manual save...")
-            # 手动保存 LoRA 权重
-            try:
-                from peft import get_peft_model_state_dict
-                if hasattr(model, 'peft_config'):
-                    model_lora_state_dict = get_peft_model_state_dict(model)
-                else:
-                    # 手动提取 LoRA 权重
-                    model_lora_state_dict = {}
-                    for name, param in model.named_parameters():
-                        if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
-                            model_lora_state_dict[name] = param.data.clone()
-                    
-                    if len(model_lora_state_dict) == 0:
-                        # 如果没有找到 LoRA 权重，保存所有可训练参数
-                        for name, param in model.named_parameters():
-                            if param.requires_grad:
-                                model_lora_state_dict[name] = param.data.clone()
+                # 手动提取 LoRA 权重
+                print("Warning: Model doesn't have peft_config, manually extracting LoRA weights...")
+                model_lora_state_dict = {}
+                for name, param in model.named_parameters():
+                    if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
+                        model_lora_state_dict[name] = param.data.clone()
                 
-                # 保存权重
+                if len(model_lora_state_dict) == 0:
+                    print("Warning: No LoRA weights found! Saving all trainable parameters...")
+                    for name, param in model.named_parameters():
+                        if param.requires_grad:
+                            model_lora_state_dict[name] = param.data.clone()
+            
+            if len(model_lora_state_dict) == 0:
+                print("Error: No weights to save!")
+            else:
+                # 保存权重文件
                 try:
                     from safetensors.torch import save_file
-                    save_file(model_lora_state_dict, os.path.join(lora_final_path, "adapter_model.safetensors"))
-                except:
-                    torch.save(model_lora_state_dict, os.path.join(lora_final_path, "adapter_model.bin"))
+                    save_file(model_lora_state_dict, os.path.join(checkpoint_save_path, "adapter_model.safetensors"))
+                    print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as safetensors")
+                except ImportError:
+                    torch.save(model_lora_state_dict, os.path.join(checkpoint_save_path, "adapter_model.bin"))
+                    print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as .bin")
+                except Exception as e:
+                    print(f"Warning: Failed to save as safetensors: {e}")
+                    torch.save(model_lora_state_dict, os.path.join(checkpoint_save_path, "adapter_model.bin"))
+                    print(f"  ✓ Saved {len(model_lora_state_dict)} LoRA weights as .bin")
                 
-                # 保存 config
-                import json
+                # 保存配置文件
                 if hasattr(model, 'peft_config'):
                     peft_config_dict = {}
                     for adapter_name, config_obj in model.peft_config.items():
                         if hasattr(config_obj, 'to_dict'):
                             config_dict = config_obj.to_dict()
-                            # 将所有set类型转换为list
                             for key, value in config_dict.items():
                                 if isinstance(value, set):
                                     config_dict[key] = list(value)
@@ -1253,96 +1083,56 @@ def main():
                         else:
                             peft_config_dict[adapter_name] = str(config_obj)
                     
-                    # 确保配置是完整的（标准 PEFT 格式，顶层不嵌套）
-                    if isinstance(peft_config_dict, dict) and len(peft_config_dict) > 0:
-                        # 提取第一个适配器的配置（通常是 "default"）
-                        if "default" in peft_config_dict:
-                            final_config = peft_config_dict["default"]
-                        else:
-                            first_adapter = list(peft_config_dict.values())[0]
-                            final_config = first_adapter
+                    # 提取标准格式配置
+                    if "default" in peft_config_dict:
+                        final_config = peft_config_dict["default"]
+                    elif len(peft_config_dict) > 0:
+                        final_config = list(peft_config_dict.values())[0]
                     else:
-                        # 从peft_config中提取target_modules
-                        target_modules_list = []
-                        if hasattr(model, 'peft_config') and len(model.peft_config) > 0:
-                            first_config = list(model.peft_config.values())[0]
-                            if hasattr(first_config, 'target_modules'):
-                                target_modules_list = list(first_config.target_modules) if isinstance(first_config.target_modules, (list, set)) else [first_config.target_modules]
-                        
-                        # 创建标准 PEFT 格式配置（顶层，不嵌套）
-                        final_config = {
-                            "peft_type": "LORA",
-                            "task_type": "CAUSAL_LM",
-                            "inference_mode": False,
-                            "r": config.get('lora_rank', 8),
-                            "lora_alpha": config.get('lora_alpha', 8),
-                            "lora_dropout": config.get('lora_dropout', 0.0),
-                            "target_modules": target_modules_list,
-                            "bias": "none",
-                            "fan_in_fan_out": False,
-                            "init_lora_weights": True,
-                            "modules_to_save": None,
-                            "layers_to_transform": None,
-                            "layers_pattern": None,
-                            "rank_pattern": {},
-                            "alpha_pattern": {},
-                            "base_model_name_or_path": None,
-                            "revision": None,
-                            "auto_mapping": None,
-                            "use_rslora": False,
-                            "megatron_config": None,
-                            "megatron_core": "megatron.core",
-                            "loftq_config": {},
-                            "use_dora": False,
-                            "layer_replication": None,
-                        }
-                    
-                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
-                    with open(config_file_path, "w", encoding='utf-8') as f:
-                        json.dump(final_config, f, indent=2, ensure_ascii=False)
+                        final_config = None
                 else:
-                    # 如果没有 peft_config，创建一个标准 PEFT 格式的 config（顶层，不嵌套）
-                    complete_config = {
+                    final_config = None
+                
+                # 如果无法从peft_config获取，创建标准配置
+                if final_config is None:
+                    target_modules_list = config.get('lora_target_modules', ["ca.proj"])
+                    final_config = {
                         "peft_type": "LORA",
                         "task_type": "CAUSAL_LM",
                         "inference_mode": False,
                         "r": config.get('lora_rank', 8),
                         "lora_alpha": config.get('lora_alpha', 8),
                         "lora_dropout": config.get('lora_dropout', 0.0),
-                        "target_modules": config.get('lora_target_modules', []),
+                        "target_modules": target_modules_list,
                         "bias": "none",
                         "fan_in_fan_out": False,
                         "init_lora_weights": True,
-                        "modules_to_save": None,
-                        "layers_to_transform": None,
-                        "layers_pattern": None,
-                        "rank_pattern": {},
-                        "alpha_pattern": {},
-                        "base_model_name_or_path": None,
-                        "revision": None,
-                        "auto_mapping": None,
-                        "use_rslora": False,
-                        "megatron_config": None,
-                        "megatron_core": "megatron.core",
-                        "loftq_config": {},
-                        "use_dora": False,
-                        "layer_replication": None,
                     }
-                    config_file_path = os.path.join(lora_final_path, "adapter_config.json")
-                    with open(config_file_path, "w", encoding='utf-8') as f:
-                        json.dump(complete_config, f, indent=2, ensure_ascii=False)
                 
-                print(f"Final LoRA model saved manually to {lora_final_path}")
-            except Exception as e2:
-                print(f"Error in manual save: {e2}")
-                import traceback
-                traceback.print_exc()
+                # 保存adapter_config.json
+                config_file_path = os.path.join(checkpoint_save_path, "adapter_config.json")
+                with open(config_file_path, "w", encoding='utf-8') as f:
+                    json.dump(final_config, f, indent=2, ensure_ascii=False)
+                print(f"  ✓ Saved adapter_config.json")
+                
+        except Exception as e:
+            print(f"Error saving LoRA weights: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: 保存所有可训练参数
+            print("Falling back to saving all trainable parameters...")
+            trainable_state_dict = {name: param.data.clone() for name, param in model.named_parameters() if param.requires_grad}
+            torch.save(trainable_state_dict, os.path.join(checkpoint_save_path, "trainable_params.bin"))
+            print(f"  ✓ Saved {len(trainable_state_dict)} trainable parameters")
     else:
+        # 保存完整模型
         torch.save({
             'model_state_dict': model.state_dict(),
             'config': config,
-        }, final_save_path)
-        print(f"Final model saved to {final_save_path}")
+        }, os.path.join(checkpoint_save_path, "model.pth"))
+        print(f"  ✓ Saved full model")
+    
+    print(f"\n✓ Checkpoint saved to: {checkpoint_save_path}")
     print("=" * 80)
     print("Training completed!")
     print("=" * 80)

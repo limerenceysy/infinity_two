@@ -605,6 +605,23 @@ def main():
     else:
         import hashlib
         from datetime import datetime
+        import re
+        
+        # 自动识别 checkpoint 编号并创建对应的子目录
+        checkpoint_subdir = None
+        if args.lora_ckpt:
+            # 从路径中提取 checkpoint-X 格式
+            match = re.search(r'checkpoint-(\d+)', args.lora_ckpt)
+            if match:
+                checkpoint_num = match.group(1)
+                checkpoint_subdir = f"checkpoint-{checkpoint_num}"
+                print(f"✓ Detected checkpoint-{checkpoint_num}, saving to subdirectory")
+        
+        # 确定输出目录
+        if checkpoint_subdir:
+            output_dir = os.path.join(args.output_dir, checkpoint_subdir)
+        else:
+            output_dir = args.output_dir
         
         # 生成唯一的文件名
         prompt_hash = hashlib.md5(args.prompt.encode('utf-8')).hexdigest()[:8]
@@ -617,7 +634,7 @@ def main():
         
         # 组合文件名: 时间戳_prompt哈希_配置信息
         filename = f"{timestamp}_{prompt_hash}{lora_suffix}{cfg_suffix}{seed_suffix}.jpg"
-        save_path = os.path.join(args.output_dir, filename)
+        save_path = os.path.join(output_dir, filename)
     
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     cv2.imwrite(save_path, generated_image.cpu().numpy())

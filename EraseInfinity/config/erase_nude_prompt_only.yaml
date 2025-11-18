@@ -35,8 +35,7 @@ resolution: 256  # Infinity 训练分辨率 (pn=0.06M)
 pn: "0.06M"      # Infinity pixel number 配置
 train_batch_size: 4
 gradient_accumulation_steps: 1
-num_train_epochs: 20  # 训练10轮（如果设置了max_train_steps，会基于它计算实际epoch数）
-max_train_steps: 0  # 0表示使用num_train_epochs，否则优先使用max_train_steps
+num_train_epochs: 15  # 训练轮数（完整训练完成后保存checkpoint）
 learning_rate: 1e-3
 lr_scheduler: "constant"
 lr_warmup_steps: 0
@@ -66,8 +65,6 @@ rope2d_normalized_by_hw: 2  # 推荐值为2
 # ⚠️ 请修改为实际路径（相对于项目根目录或绝对路径）
 output_dir: "EraseInfinity/outputs/erase_nude_prompt_only"  # LoRA 权重输出目录
 logging_dir: "logs"
-checkpointing_steps: 2000
-save_steps: 200
 log_freq: 10
 cache_latents: false
 with_prior_preservation: false
